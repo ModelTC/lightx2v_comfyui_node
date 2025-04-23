@@ -11,7 +11,12 @@ import json
 from fractions import Fraction
 from comfy.comfy_types import FileLocator
 from lightx2v.utils.utils import save_videos_grid, seed_all, cache_video
-from lightx2v.__main__ import load_models, run_image_encoder, run_text_encoder, set_target_shape, init_scheduler, run_main_inference
+from lightx2v.__main__ import load_models, run_image_encoder, run_text_encoder, set_target_shape, init_scheduler 
+from lightx2v.utils.set_config import set_config
+from lightx2v.utils.profiler import ProfilingContext, ProfilingContext4Debug
+from lightx2v.models.runners.default_runner import DefaultRunner
+from lightx2v.models.runners.graph_runner import GraphRunner
+from lightx2v.utils.envs import *
 
 class FakeArgs:
     def __init__(
@@ -42,7 +47,10 @@ class FakeArgs:
         vae_stride: tuple = (4, 8, 8),
         patch_size: tuple = (1, 2, 2),
         teacache_thresh: float = 0.26,
-        use_ret_steps: bool = False
+        use_ret_steps: bool = False,
+        use_bfloat16: bool = True,
+        lora_path: str = None,
+        strength_model: float = 1.0,
     ):
         self.model_cls = model_cls
         self.task = task
@@ -71,82 +79,71 @@ class FakeArgs:
         self.patch_size = patch_size
         self.teacache_thresh = teacache_thresh
         self.use_ret_steps = use_ret_steps
+        self.use_bfloat16 = use_bfloat16
+        self.lora_path = lora_path
+        self.strength_model = strength_model
 
 
 def gen_video(args):
-    start_time = time.time()
+
+    start_time = time.perf_counter()
     print(f"args: {args}")
 
     seed_all(args.seed)
 
-    if args.parallel_attn_type:
+    config = set_config(args)
+
+    if config.parallel_attn_type:
         dist.init_process_group(backend="nccl")
 
-    if args.mm_config:
-        mm_config = json.loads(args.mm_config)
-    else:
-        mm_config = None
+    print(f"config: {config}")
 
-    model_config = {
-        "model_cls": args.model_cls,
-        "task": args.task,
-        "attention_type": args.attention_type,
-        "sample_neg_prompt": args.sample_neg_prompt,
-        "mm_config": mm_config,
-        "do_mm_calib": args.do_mm_calib,
-        "cpu_offload": args.cpu_offload,
-        "feature_caching": args.feature_caching,
-        "parallel_attn_type": args.parallel_attn_type,
-        "parallel_vae": args.parallel_vae,
-    }
+    with ProfilingContext("Load models"):
+        model, text_encoders, vae_model, image_encoder = load_models(config)
 
-    if args.config_path is not None:
-        with open(args.config_path, "r") as f:
-            config = json.load(f)
-        model_config.update(config)
-
-    print(f"model_config: {model_config}")
-
-    model, text_encoders, vae_model, image_encoder = load_models(args, model_config)
-
-    load_models_time = time.time()
-    print(f"Load models cost: {load_models_time - start_time}")
-
-    if args.task in ["i2v"]:
-        image_encoder_output = run_image_encoder(args, image_encoder, vae_model)
+    if config["task"] in ["i2v"]:
+        image_encoder_output = run_image_encoder(config, image_encoder, vae_model)
     else:
         image_encoder_output = {"clip_encoder_out": None, "vae_encode_out": None}
 
-    text_encoder_output = run_text_encoder(args, args.prompt, text_encoders, model_config, image_encoder_output)
+    with ProfilingContext("Run Text Encoder"):
+        text_encoder_output = run_text_encoder(config["prompt"], text_encoders, config, image_encoder_output)
 
-    set_target_shape(args, image_encoder_output)
-    scheduler = init_scheduler(args, image_encoder_output)
+    inputs = {"text_encoder_output": text_encoder_output, "image_encoder_output": image_encoder_output}
+
+    set_target_shape(config, image_encoder_output)
+    scheduler = init_scheduler(config, image_encoder_output)
 
     model.set_scheduler(scheduler)
 
     gc.collect()
     torch.cuda.empty_cache()
-    latents, generator = run_main_inference(args, model, text_encoder_output, image_encoder_output)
 
-    if args.cpu_offload:
+    if CHECK_ENABLE_GRAPH_MODE():
+        default_runner = DefaultRunner(model, inputs)
+        runner = GraphRunner(default_runner)
+    else:
+        runner = DefaultRunner(model, inputs)
+
+    latents, generator = runner.run()
+
+    if config.cpu_offload:
         scheduler.clear()
         del text_encoder_output, image_encoder_output, model, text_encoders, scheduler
         torch.cuda.empty_cache()
 
-    images = vae_model.decode(latents, generator=generator, args=args)
+    with ProfilingContext("Run VAE"):
+        images = vae_model.decode(latents, generator=generator, config=config)
 
-    if not args.parallel_attn_type or (args.parallel_attn_type and dist.get_rank() == 0):
-        save_video_st = time.time()
-        if args.model_cls == "wan2.1":
-            cache_video(tensor=images, save_file=args.save_video_path, fps=16, nrow=1, normalize=True, value_range=(-1, 1))
-        else:
-            save_videos_grid(images, args.save_video_path, fps=24)
-        save_video_et = time.time()
-        print(f"Save video cost: {save_video_et - save_video_st}")
+    if not config.parallel_attn_type or (config.parallel_attn_type and dist.get_rank() == 0):
+        with ProfilingContext("Save video"):
+            if config.model_cls == "wan2.1":
+                cache_video(tensor=images, save_file=config.save_video_path, fps=16, nrow=1, normalize=True, value_range=(-1, 1))
+            else:
+                save_videos_grid(images, config.save_video_path, fps=24)
 
-    end_time = time.time()
+    end_time = time.perf_counter()
     print(f"Total cost: {end_time - start_time}")
-    return
 
 
 class Lightx2vPipeline:
@@ -169,10 +166,10 @@ class Lightx2vPipeline:
                 "model_cls": (["wan2.1", "hunyuan"],),
                 "task": (["t2v", "i2v"],),
                 "model_path": ([
-                    "custom_nodes/lightx2v_comfyui_node/x2v_models/wan/Wan2.1-T2V-1.3B",
-                    "custom_nodes/lightx2v_comfyui_node/x2v_models/hunyuan/lightx2v_format/t2v",
-                    "custom_nodes/lightx2v_comfyui_node/x2v_models/wan/Wan2.1-I2V-14B-480P",
-                    "custom_nodes/lightx2v_comfyui_node/x2v_models/hunyuan/lightx2v_format/i2v",
+                    "/x2v_models/wan/Wan2.1-T2V-1.3B",
+                    "/x2v_models/hunyuan/lightx2v_format/t2v",
+                    "/x2v_models/wan/Wan2.1-I2V-14B-480P",
+                    "/x2v_models/hunyuan/lightx2v_format/i2v",
                 ],),
                 "prompt": ("STRING",),
                 "infer_steps": ("INT",),
@@ -194,6 +191,11 @@ class Lightx2vPipeline:
                 "teacache_thresh": ("FLOAT", {"default": 0.26}),
                 "use_ret_steps": ("BOOLEAN", {"default": False}),
                 "image": (["none",] + sorted(files), {"image_upload": True}),
+                "use_bfloat16": ("BOOLEAN", {"default": True}),
+                "lora_path": ("STRING", {"default": "none"}),
+                "strength_model": ("FLOAT", {"default": 1.0}),
+                "vae_stride": ("STRING", {"default": "4-8-8"}),
+                "patch_size": ("STRING", {"default": "1-2-2"}),
             }
         }
         return data
@@ -223,9 +225,18 @@ class Lightx2vPipeline:
         teacache_thresh,
         use_ret_steps,
         image,
+        use_bfloat16,
+        lora_path,
+        strength_model,
+        vae_stride,
+        patch_size,
     ):
         if parallel_attn_type == "none":
             parallel_attn_type = None
+        if lora_path == "none":
+            lora_path = None
+        vae_stride = tuple([int(x) for x in vae_stride.split('-')])
+        patch_size = tuple([int(x) for x in patch_size.split('-')])
         config_path = None
         if model_cls == "wan2.1":
             config_path = os.path.join(model_path, "config.json")
@@ -258,13 +269,16 @@ class Lightx2vPipeline:
             feature_caching,
             mm_config,
             seed,
-            None if parallel_attn_type == "none" else parallel_attn_type,
+            parallel_attn_type,
             parallel_vae,
             max_area,
-            (4, 8, 8),
-            (1, 2, 2),
+            vae_stride,
+            patch_size,
             teacache_thresh,
             use_ret_steps,
+            use_bfloat16,
+            lora_path,
+            strength_model,
         )
 
         gen_video(args)
