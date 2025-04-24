@@ -84,67 +84,6 @@ class FakeArgs:
         self.strength_model = strength_model
 
 
-def gen_video(args):
-
-    start_time = time.perf_counter()
-    print(f"args: {args}")
-
-    seed_all(args.seed)
-
-    config = set_config(args)
-
-    if config.parallel_attn_type:
-        dist.init_process_group(backend="nccl")
-
-    print(f"config: {config}")
-
-    with ProfilingContext("Load models"):
-        model, text_encoders, vae_model, image_encoder = load_models(config)
-
-    if config["task"] in ["i2v"]:
-        image_encoder_output = run_image_encoder(config, image_encoder, vae_model)
-    else:
-        image_encoder_output = {"clip_encoder_out": None, "vae_encode_out": None}
-
-    with ProfilingContext("Run Text Encoder"):
-        text_encoder_output = run_text_encoder(config["prompt"], text_encoders, config, image_encoder_output)
-
-    inputs = {"text_encoder_output": text_encoder_output, "image_encoder_output": image_encoder_output}
-
-    set_target_shape(config, image_encoder_output)
-    scheduler = init_scheduler(config, image_encoder_output)
-
-    model.set_scheduler(scheduler)
-
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    if CHECK_ENABLE_GRAPH_MODE():
-        default_runner = DefaultRunner(model, inputs)
-        runner = GraphRunner(default_runner)
-    else:
-        runner = DefaultRunner(model, inputs)
-
-    latents, generator = runner.run()
-
-    if config.cpu_offload:
-        scheduler.clear()
-        del text_encoder_output, image_encoder_output, model, text_encoders, scheduler
-        torch.cuda.empty_cache()
-
-    with ProfilingContext("Run VAE"):
-        images = vae_model.decode(latents, generator=generator, config=config)
-
-    if not config.parallel_attn_type or (config.parallel_attn_type and dist.get_rank() == 0):
-        with ProfilingContext("Save video"):
-            if config.model_cls == "wan2.1":
-                cache_video(tensor=images, save_file=config.save_video_path, fps=16, nrow=1, normalize=True, value_range=(-1, 1))
-            else:
-                save_videos_grid(images, config.save_video_path, fps=24)
-
-    end_time = time.perf_counter()
-    print(f"Total cost: {end_time - start_time}")
-
 
 class Lightx2vPipeline:
     CATEGORY = "Lightx2v"
@@ -156,6 +95,11 @@ class Lightx2vPipeline:
         self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
         self.prefix_append = ""
+        self.model = None
+        self.config = None
+        self.text_encoders = None
+        self.vae_model = None
+        self.image_encoder = None
 
     @classmethod    
     def INPUT_TYPES(s):
@@ -247,6 +191,7 @@ class Lightx2vPipeline:
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(f"lightx2v_{task}_{model_cls}", self.output_dir, target_width, target_height)
         out_filename = f"{filename}_{counter:05}_.mp4"
         save_video_path = os.path.join(full_output_folder, out_filename)
+        print("save_video_path:", save_video_path, os.path.exists(full_output_folder))
 
         args = FakeArgs(
             model_cls,
@@ -281,7 +226,7 @@ class Lightx2vPipeline:
             strength_model,
         )
 
-        gen_video(args)
+        self.gen_video(args)
 
         results: list[FileLocator] = [{
             "filename": out_filename,
@@ -289,6 +234,83 @@ class Lightx2vPipeline:
             "type": self.type
         }]
         return {"ui": {"images": results, "animated": (True,)}}  # TODO: frontend side
+
+    def check_same_model(self, config):
+        if self.config is None \
+           or self.config.model_path != config.model_path \
+           or self.config.model_cls != config.model_cls \
+           or self.config.task != config.task \
+           or self.config.lora_path != config.lora_path:
+            return False
+        return True
+
+    def init_models(self, config):
+        if not self.check_same_model(config):
+            if self.model:
+                del self.model, self.text_encoders, self.vae_model, self.image_encoder
+            self.config = config
+            with ProfilingContext("Load models"):
+                self.model, self.text_encoders, self.vae_model, self.image_encoder = load_models(config)
+        return self.model, self.text_encoders, self.vae_model, self.image_encoder
+
+    def gen_video(self, args):
+
+        start_time = time.perf_counter()
+        print(f"args: {args}")
+
+        seed_all(args.seed)
+        config = set_config(args)
+
+        if config.parallel_attn_type:
+            dist.init_process_group(backend="nccl")
+        print(f"config: {config}")
+
+        model, text_encoders, vae_model, image_encoder = self.init_models(config)
+
+        if config["task"] in ["i2v"]:
+            image_encoder_output = run_image_encoder(config, image_encoder, vae_model)
+        else:
+            image_encoder_output = {"clip_encoder_out": None, "vae_encode_out": None}
+
+        with ProfilingContext("Run Text Encoder"):
+            text_encoder_output = run_text_encoder(config["prompt"], text_encoders, config, image_encoder_output)
+
+        inputs = {"text_encoder_output": text_encoder_output, "image_encoder_output": image_encoder_output}
+
+        set_target_shape(config, image_encoder_output)
+        scheduler = init_scheduler(config, image_encoder_output)
+
+        model.set_scheduler(scheduler)
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        if CHECK_ENABLE_GRAPH_MODE():
+            default_runner = DefaultRunner(model, inputs)
+            runner = GraphRunner(default_runner)
+        else:
+            runner = DefaultRunner(model, inputs)
+
+        latents, generator = runner.run()
+
+        if config.cpu_offload:
+            scheduler.clear()
+            del text_encoder_output, image_encoder_output, model, text_encoders, scheduler
+            torch.cuda.empty_cache()
+
+        with ProfilingContext("Run VAE"):
+            images = vae_model.decode(latents, generator=generator, config=config)
+
+        if not config.parallel_attn_type or (config.parallel_attn_type and dist.get_rank() == 0):
+            with ProfilingContext("Save video"):
+                if config.model_cls == "wan2.1":
+                    cache_video(tensor=images, save_file=config.save_video_path, fps=16, nrow=1, normalize=True, value_range=(-1, 1))
+                else:
+                    save_videos_grid(images, config.save_video_path, fps=24)
+
+        end_time = time.perf_counter()
+        print(f"Total cost: {end_time - start_time}")
+
 
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
