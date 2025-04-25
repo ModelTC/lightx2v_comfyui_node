@@ -13,25 +13,21 @@ cd ComfyUI/
 pip install -r requirements.txt
 ```
 
-#### 安装 lightx2v
-```
-git clone https://github.com/ModelTC/lightx2v.git
-cd lightx2v/
-git checkout 5c9c346ff488900bf291fcb8ceaf56521ba3e04b
-export PYTHONPATH=/path/of/lightx2v:$PYTHONPATH
-pip install transformers==4.45.2
-```
-
-#### 安装 lightx2v node
+#### 安装 lightx2v node 和 lightx2v
 ```
 cd ComfyUI/custom_nodes/
 git clone https://github.com/ModelTC/lightx2v_comfyui_node.git
 cd lightx2v_comfyui_node/
 git checkout develop
+git submodule update --init --recursive
+pip install -r lightx2v/requirements.txt
+pip install transformers==4.45.2
+pip install --upgrade sgl_kernel
 ```
 
 #### 启动 ComfyUI
 ```
+export PYTHONPATH=custom_nodes/lightx2v_comfyui_node/lightx2v:$PYTHONPATH
 cd ComfyUI/
 python main.py --input-directory custom_nodes/lightx2v_comfyui_node/input --listen 0.0.0.0 --enable-cors-header --port 8080
 ```
