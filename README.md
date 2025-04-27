@@ -20,9 +20,9 @@ git clone https://github.com/ModelTC/lightx2v_comfyui_node.git
 cd lightx2v_comfyui_node/
 git checkout develop
 git submodule update --init --recursive
-pip install -r lightx2v/requirements.txt
-pip install transformers==4.45.2
+pip install easydict
 pip install --upgrade sgl_kernel
+pip install transformers==4.45.2
 ```
 
 #### 启动 ComfyUI
