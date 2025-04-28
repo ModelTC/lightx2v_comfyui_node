@@ -1,0 +1,75 @@
+{
+    "client_id": "258a9fa0c9a64f298bf2939cde966f83",
+    "prompt": {
+        "3": {
+            "inputs": {
+                "model_cls": "hunyuan",
+                "task": "t2v",
+                "model_path": "/x2v_models/hunyuan/lightx2v_format/t2v",
+                "prompt": "A cat walks on the grass, realistic style.",
+                "negative_prompt": "",
+                "image": "none",
+                "config_json": "hunyuan_t2v.json"
+            },
+            "class_type": "Lightx2vPipeline",
+            "_meta": {
+                "title": "Lightx2vPipeline"
+            }
+        }
+    },
+    "extra_data": {
+        "extra_pnginfo": {
+            "workflow": {
+                "id": "2197211e-e0ed-45ce-b48f-c24bb9e9ef01",
+                "revision": 0,
+                "last_node_id": 3,
+                "last_link_id": 0,
+                "nodes": [
+                    {
+                        "id": 3,
+                        "type": "Lightx2vPipeline",
+                        "pos": [
+                            587.1073608398438,
+                            -595.9179077148438
+                        ],
+                        "size": [
+                            315,
+                            226
+                        ],
+                        "flags": {},
+                        "order": 0,
+                        "mode": 0,
+                        "inputs": [],
+                        "outputs": [],
+                        "properties": {
+                            "Node name for S&R": "Lightx2vPipeline"
+                        },
+                        "widgets_values": [
+                            "hunyuan",
+                            "t2v",
+                            "/x2v_models/hunyuan/lightx2v_format/t2v",
+                            "A cat walks on the grass, realistic style.",
+                            "",
+                            "none",
+                            "hunyuan_t2v.json",
+                            "image"
+                        ]
+                    }
+                ],
+                "links": [],
+                "groups": [],
+                "config": {},
+                "extra": {
+                    "ds": {
+                        "scale": 0.6830134553650705,
+                        "offset": [
+                            679.9473749800729,
+                            827.6764670642995
+                        ]
+                    }
+                },
+                "version": 0.4
+            }
+        }
+    }
+}

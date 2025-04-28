@@ -84,7 +84,7 @@ class Lightx2vPipeline:
             image_path = folder_paths.get_annotated_filepath(image) 
 
         full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(f"lightx2v_{task}_{model_cls}", self.output_dir)
-        out_filename = f"{filename}_{counter:05}.mp4"
+        out_filename = f"{filename}_{counter:05}_.mp4"
         save_video_path = os.path.join(full_output_folder, out_filename)
         print("save_video_path:", save_video_path)
 
